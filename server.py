@@ -23,6 +23,7 @@ OUTLINE_MM = 1.6            # سمك خط الـ outline
 COLOR_SIGMA_MM = 0.5        # حجم الضبابية لفصل اللون عن الملمس
 LIGHT_TARGET = 175.0        # الألوان الأفتح من كده بتتغمّق قبل الموديل وترجع بعده
 LIGHT_K_MIN = 0.6           # أقصى تغميق (k)
+DEFRINGE_PX = 3             # عرض شريط الحافة اللي بيتنضف من لون الخلفية الرمادي
 COLOR_FIDELITY = 0.8        # ثابت: ألوان الأصل + ملمس الموديل
 CROSS_CELL_MM = 1.5         # حجم خلية غرزة الإكس (Cross-stitch)
 APPLIQUE_BORDER_MM = 2.0    # عرض إطار الساتان حوالين قماش الـ Appliqué
@@ -172,6 +173,21 @@ def compute_light_k(rgb: np.ndarray, a: np.ndarray) -> np.ndarray:
     lum = masked_blur(gray[:, :, None], a, sigma)[:, :, 0]
     k = np.clip(LIGHT_TARGET / np.maximum(lum, 1.0), LIGHT_K_MIN, 1.0)
     return k[:, :, None].astype(np.float32)
+
+
+def defringe(rgb: np.ndarray, alpha: np.ndarray, band: int = DEFRINGE_PX) -> np.ndarray:
+    """بيشيل الهالة الفاتحة حوالين الحواف: الموديل بيشوف التصميم على خلفية رمادي فاتح
+    فبيطلع شريط رمادي على الحافة، وده بيبان أبيض على القماش الغامق.
+    بنستبدل ألوان الشريط بألوان الداخل القريبة منه."""
+    core = (alpha > 0.95).astype(np.uint8)
+    core = cv2.erode(core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * band + 1, 2 * band + 1)))
+    core_f = core.astype(np.float32)
+    sigma = band * 0.8 + 1.0
+    fill = masked_blur(rgb, core_f, sigma)
+    valid = cv2.GaussianBlur(core_f, (0, 0), sigma) > 0.02
+    use_fill = (core_f < 0.5) & valid
+    out = np.where(use_fill[:, :, None], fill, rgb.astype(np.float32))
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def apply_3d_puff_shading(rgb: np.ndarray, mask_f: np.ndarray) -> np.ndarray:
@@ -415,6 +431,9 @@ def run_embroidery_pipeline(
         res = out_rgb[pad:h - pad, pad:w - pad]
         return Image.fromarray(res, mode="RGB")
 
+    if style != "cross":
+        out_rgb = defringe(out_rgb, orig_a)
+
     # 7. حافة التطريز الطبيعية
     hh, ww = orig_a.shape
     grid_y, grid_x = np.mgrid[0:hh, 0:ww].astype(np.float32)
@@ -426,6 +445,8 @@ def run_embroidery_pipeline(
         wavy_a = cv2.remap(orig_a, grid_x + wave_x, grid_y + wave_y, cv2.INTER_LINEAR, borderValue=0.0)
 
     fg_a = np.clip((wavy_a - 0.18) / 0.72, 0.0, 1.0)
+    if style != "cross":
+        fg_a = cv2.erode(fg_a, np.ones((3, 3), np.uint8))  # شيل بكسل الحافة المتأثر بالخلفية
     fg_a_3d = fg_a[:, :, None]
 
     if with_shadow:
