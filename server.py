@@ -19,6 +19,9 @@ PX_PER_MM = 12.0
 MIN_DESIGN_MM, MAX_DESIGN_MM = 20.0, 85.0
 DEFAULT_DESIGN_MM = 80.0
 
+MODEL_TARGET_PX = 560   # أكبر ضلع للتصميم وهو داخل الموديل (جرّب 480 / 560 / 640)
+OUTPUT_MAX_PX = 1600    # أكبر ضلع للنتيجة النهائية
+
 OUTLINE_MM = 1.6            # سمك خط الـ outline
 COLOR_SIGMA_MM = 0.5        # حجم الضبابية لفصل اللون عن الملمس
 LIGHT_TARGET = 175.0        # الألوان الأفتح من كده بتتغمّق قبل الموديل وترجع بعده
@@ -331,8 +334,19 @@ def run_embroidery_pipeline(
             rgba = rgba[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
 
     # 2. مقاس ثابت بالمليمتر => حجم غرزة ثابت
-    design_mm = float(np.clip(design_mm, MIN_DESIGN_MM, MAX_DESIGN_MM))
-    target = design_mm * PX_PER_MM
+    # design_mm = float(np.clip(design_mm, MIN_DESIGN_MM, MAX_DESIGN_MM))
+    # target = design_mm * PX_PER_MM
+
+    def upscale_result(img: Image.Image, factor: float) -> Image.Image:
+    if factor <= 1.02:
+        return img
+    w, h = img.size
+    big = img.resize((int(w * factor), int(h * factor)), Image.LANCZOS)
+    arr = np.array(big)
+    blur = cv2.GaussianBlur(arr, (0, 0), 1.0)
+    arr = cv2.addWeighted(arr, 1.3, blur, -0.3, 0)
+    return Image.fromarray(arr)
+    
     if style == "applique" and not has_transparency:
         style = "classic"  # الـ appliqué محتاج شكل شفاف
     if style == "patch" and has_transparency:
@@ -429,7 +443,8 @@ def run_embroidery_pipeline(
 
     if not has_transparency:
         res = out_rgb[pad:h - pad, pad:w - pad]
-        return Image.fromarray(res, mode="RGB")
+        # return Image.fromarray(res, mode="RGB")
+    return upscale_result(Image.fromarray(res, mode="RGB"), final_scale)
 
     if style != "cross":
         out_rgb = defringe(out_rgb, orig_a)
@@ -477,7 +492,9 @@ def run_embroidery_pipeline(
     if pad_r:
         result_rgba = result_rgba[:, :-pad_r]
 
-    return Image.fromarray(result_rgba, mode="RGBA")
+    # return Image.fromarray(result_rgba, mode="RGBA")
+
+return upscale_result(Image.fromarray(result_rgba, mode="RGBA"), final_scale)
 
 
 # ───────────────────────── الـ API ─────────────────────────
