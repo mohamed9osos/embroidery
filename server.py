@@ -462,6 +462,7 @@ def run_embroidery_pipeline(
 
     fg_a = np.clip((wavy_a - 0.18) / 0.72, 0.0, 1.0)
     if style != "cross":
+        pass  # ملغي erode عشان الحروف متتآكلش
     fg_a_3d = fg_a[:, :, None]
 
     if with_shadow:
