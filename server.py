@@ -80,6 +80,17 @@ def odd(n: int, lo: int = 3) -> int:
     return n if n % 2 == 1 else n + 1
 
 
+def upscale_result(img: Image.Image, factor: float) -> Image.Image:
+    if factor <= 1.02:
+        return img
+    w, h = img.size
+    big = img.resize((int(w * factor), int(h * factor)), Image.LANCZOS)
+    arr = np.array(big)
+    blur = cv2.GaussianBlur(arr, (0, 0), 1.0)
+    arr = cv2.addWeighted(arr, 1.3, blur, -0.3, 0)
+    return Image.fromarray(arr)
+
+
 def resize_rgba(rgba: np.ndarray, new_w: int, new_h: int) -> np.ndarray:
     """Resize لـ RGBA بطريقة premultiplied: بيمنع تلوّث الحواف بألوان البكسلات الشفافة
     (ده كان سبب الشريط الأخضر)."""
@@ -333,19 +344,10 @@ def run_embroidery_pipeline(
         if len(xs) > 0 and len(ys) > 0:
             rgba = rgba[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
 
-    # 2. مقاس ثابت بالمليمتر => حجم غرزة ثابت
-    # design_mm = float(np.clip(design_mm, MIN_DESIGN_MM, MAX_DESIGN_MM))
-    # target = design_mm * PX_PER_MM
-
-    def upscale_result(img: Image.Image, factor: float) -> Image.Image:
-    if factor <= 1.02:
-        return img
-    w, h = img.size
-    big = img.resize((int(w * factor), int(h * factor)), Image.LANCZOS)
-    arr = np.array(big)
-    blur = cv2.GaussianBlur(arr, (0, 0), 1.0)
-    arr = cv2.addWeighted(arr, 1.3, blur, -0.3, 0)
-    return Image.fromarray(arr)
+    design_mm = float(np.clip(design_mm, MIN_DESIGN_MM, MAX_DESIGN_MM))
+    # الموديل دايماً بيشوف نفس الحجم، بغض النظر عن حجم التصميم على المنتج
+    target = float(MODEL_TARGET_PX)
+    final_scale = min(OUTPUT_MAX_PX, design_mm * PX_PER_MM) / target
     
     if style == "applique" and not has_transparency:
         style = "classic"  # الـ appliqué محتاج شكل شفاف
@@ -443,8 +445,7 @@ def run_embroidery_pipeline(
 
     if not has_transparency:
         res = out_rgb[pad:h - pad, pad:w - pad]
-        # return Image.fromarray(res, mode="RGB")
-    return upscale_result(Image.fromarray(res, mode="RGB"), final_scale)
+        return upscale_result(Image.fromarray(res, mode="RGB"), final_scale)
 
     if style != "cross":
         out_rgb = defringe(out_rgb, orig_a)
@@ -492,9 +493,7 @@ def run_embroidery_pipeline(
     if pad_r:
         result_rgba = result_rgba[:, :-pad_r]
 
-    # return Image.fromarray(result_rgba, mode="RGBA")
-
-return upscale_result(Image.fromarray(result_rgba, mode="RGBA"), final_scale)
+    return upscale_result(Image.fromarray(result_rgba, mode="RGBA"), final_scale)
 
 
 # ───────────────────────── الـ API ─────────────────────────
