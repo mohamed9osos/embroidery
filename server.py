@@ -462,7 +462,6 @@ def run_embroidery_pipeline(
 
     fg_a = np.clip((wavy_a - 0.18) / 0.72, 0.0, 1.0)
     if style != "cross":
-        # fg_a = cv2.erode(fg_a, np.ones((3, 3), np.uint8))  # شيل بكسل الحافة المتأثر بالخلفية
     fg_a_3d = fg_a[:, :, None]
 
     if with_shadow:
