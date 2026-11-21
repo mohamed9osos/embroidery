@@ -19,14 +19,14 @@ PX_PER_MM = 12.0
 MIN_DESIGN_MM, MAX_DESIGN_MM = 20.0, 85.0
 DEFAULT_DESIGN_MM = 80.0
 
-MODEL_TARGET_PX = 256   # كان 560
+MODEL_TARGET_PX = 448   # كان 560
 OUTPUT_MAX_PX = 1000    # كان 1600أكبر ضلع للنتيجة النهائية
 
 OUTLINE_MM = 1.6            # سمك خط الـ outline
 COLOR_SIGMA_MM = 0.5        # حجم الضبابية لفصل اللون عن الملمس
 LIGHT_TARGET = 175.0        # الألوان الأفتح من كده بتتغمّق قبل الموديل وترجع بعده
 LIGHT_K_MIN = 0.6           # أقصى تغميق (k)
-DEFRINGE_PX = 3             # عرض شريط الحافة اللي بيتنضف من لون الخلفية الرمادي
+DEFRINGE_PX = 2             # عرض شريط الحافة اللي بيتنضف من لون الخلفية الرمادي
 COLOR_FIDELITY = 0.8        # ثابت: ألوان الأصل + ملمس الموديل
 CROSS_CELL_MM = 1.5         # حجم خلية غرزة الإكس (Cross-stitch)
 APPLIQUE_BORDER_MM = 2.0    # عرض إطار الساتان حوالين قماش الـ Appliqué
@@ -453,8 +453,8 @@ def run_embroidery_pipeline(
     # 7. حافة التطريز الطبيعية
     hh, ww = orig_a.shape
     grid_y, grid_x = np.mgrid[0:hh, 0:ww].astype(np.float32)
-    wave_x = np.sin(grid_y * 0.75) * 0.85
-    wave_y = np.sin(grid_x * 0.75) * 0.85
+    wave_x = np.sin(grid_y * 0.75) * 0.35
+    wave_y = np.sin(grid_x * 0.75) * 0.35
     if style == "cross":
         wavy_a = orig_a  # حواف الغرز الحادة من غير تموج
     else:
@@ -462,7 +462,7 @@ def run_embroidery_pipeline(
 
     fg_a = np.clip((wavy_a - 0.18) / 0.72, 0.0, 1.0)
     if style != "cross":
-        fg_a = cv2.erode(fg_a, np.ones((3, 3), np.uint8))  # شيل بكسل الحافة المتأثر بالخلفية
+        # fg_a = cv2.erode(fg_a, np.ones((3, 3), np.uint8))  # شيل بكسل الحافة المتأثر بالخلفية
     fg_a_3d = fg_a[:, :, None]
 
     if with_shadow:
