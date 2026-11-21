@@ -19,8 +19,8 @@ PX_PER_MM = 12.0
 MIN_DESIGN_MM, MAX_DESIGN_MM = 20.0, 85.0
 DEFAULT_DESIGN_MM = 80.0
 
-MODEL_TARGET_PX = 560   # أكبر ضلع للتصميم وهو داخل الموديل (جرّب 480 / 560 / 640)
-OUTPUT_MAX_PX = 1600    # أكبر ضلع للنتيجة النهائية
+MODEL_TARGET_PX = 256   # كان 560
+OUTPUT_MAX_PX = 1000    # كان 1600أكبر ضلع للنتيجة النهائية
 
 OUTLINE_MM = 1.6            # سمك خط الـ outline
 COLOR_SIGMA_MM = 0.5        # حجم الضبابية لفصل اللون عن الملمس
