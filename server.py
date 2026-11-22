@@ -75,7 +75,7 @@ STITCH_ANGLE_DEG = 45
 INTERIOR_START_MM = 1.5     # بعد كام مم من الحافة تبدأ الغرز الصناعية
 INTERIOR_FULL_MM = 3.5      # عندها الغرز تبقى بكامل قوتها
 RELIEF_STRENGTH = 0.9       # قوة الإضاءة الكلية
-
+DOME_STRENGTH = 2.5         # قوة القبة (زوّدها لو الداخل لسه مسطح)
 
 def add_uniform_relief(rgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     """ريليف ثابت بالمليمتر: حافة بارزة + غرز في الداخل، بغض النظر عن حجم التصميم."""
@@ -113,12 +113,21 @@ def add_uniform_relief(rgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     w_in = np.clip((dist - s) / max(e - s, 1.0), 0.0, 1.0).astype(f32)
     w_in = (w_in * w_in * (3 - 2 * w_in)).astype(f32)
 
-    height = np.ascontiguousarray((1.2 * bevel + 0.35 * stitch * w_in).astype(f32))
+    # قبة محدبة بتتكيف مع عرض الخط: أقصى مسافة محلية من الحافة
+    local_max = cv2.dilate(dist, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (101, 101)))
+    local_max = cv2.GaussianBlur(local_max, (0, 0), 15)
+    local_max = np.maximum(local_max, 1.0)
+    t = np.clip(dist / local_max, 0.0, 1.0)
+    dome = np.sqrt(np.clip(1.0 - (1.0 - t) ** 2, 0.0, 1.0)).astype(f32)   # قبة ناعمة
+
+    height = np.ascontiguousarray(
+        (1.2 * bevel + DOME_STRENGTH * dome + 0.6 * stitch * w_in).astype(f32)
+    )
 
     # 3) إضاءة موحدة
     gx = cv2.Sobel(height, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(height, cv2.CV_32F, 0, 1, ksize=3)
-    light = np.clip(-(gx * 0.65 + gy * 0.75) * RELIEF_STRENGTH * 0.5, -0.28, 0.30).astype(f32)
+    light = np.clip(-(gx * 0.65 + gy * 0.75) * RELIEF_STRENGTH * 0.5, -0.30, 0.32).astype(f32)
     light *= (alpha > 0.4)
 
     shaded = rgb.astype(f32) * (1.0 + light[:, :, None])
