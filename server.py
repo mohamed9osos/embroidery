@@ -66,6 +66,62 @@ EMB_SESSION = ort.InferenceSession(
 _INFER_LOCK = threading.Semaphore(1)
 
 
+RELIEF_EDGE_MM = 1.2        # عرض الـ bevel عند الحافة
+STITCH_PITCH_MM = 0.45      # المسافة بين خطوط الغرز
+STITCH_LEN_MM = 3.0         # طول الغرزة قبل التكسير
+STITCH_ANGLE_DEG = 45
+INTERIOR_START_MM = 1.5     # بعد كام مم من الحافة تبدأ الغرز الصناعية
+INTERIOR_FULL_MM = 3.5      # عندها الغرز تبقى بكامل قوتها
+RELIEF_STRENGTH = 0.9       # قوة الإضاءة الكلية
+
+
+def add_uniform_relief(rgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """ريليف ثابت بالمليمتر: حافة بارزة + غرز في الداخل، بغض النظر عن حجم التصميم."""
+    mask = (alpha > 0.4).astype(np.uint8)
+    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    H, W = mask.shape
+
+    # 1) bevel ثابت عند الحافة
+    r = RELIEF_EDGE_MM * PX_PER_MM
+    bevel = 1.0 - np.exp(-dist / r)
+    bevel = cv2.GaussianBlur(bevel, (0, 0), 1.5)
+
+    # 2) غرز ساتان اصطناعية
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    th = np.deg2rad(STITCH_ANGLE_DEG)
+    u = xx * np.cos(th) + yy * np.sin(th)     # عمودي على الغرز
+    v = -xx * np.sin(th) + yy * np.cos(th)    # على طول الغرز
+    pitch = STITCH_PITCH_MM * PX_PER_MM
+    slen = STITCH_LEN_MM * PX_PER_MM
+
+    row = np.floor(u / pitch).astype(np.int32)
+    row -= row.min()
+    rng = np.random.default_rng(11)
+    phase = rng.uniform(0, slen, row.max() + 1).astype(np.float32)[row]
+
+    ridge = 0.5 + 0.5 * np.cos(2 * np.pi * u / pitch)           # حرف الغرزة
+    pos = np.mod(v + phase, slen)                                 # مكان التكسير
+    gap = np.exp(-((pos / (0.25 * PX_PER_MM)) ** 2))              # نقطة دخول الإبرة
+    stitch = ridge * (1.0 - 0.6 * gap)
+
+    # الغرز تظهر بس في الداخل
+    s, e = INTERIOR_START_MM * PX_PER_MM, INTERIOR_FULL_MM * PX_PER_MM
+    w_in = np.clip((dist - s) / max(e - s, 1.0), 0.0, 1.0)
+    w_in = w_in * w_in * (3 - 2 * w_in)
+
+    height = 1.2 * bevel + 0.35 * stitch * w_in
+
+    # 3) إضاءة موحدة
+    gx = cv2.Sobel(height, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(height, cv2.CV_32F, 0, 1, ksize=3)
+    light = np.clip(-(gx * 0.65 + gy * 0.75) * RELIEF_STRENGTH * 0.5, -0.28, 0.30)
+    light *= (alpha > 0.4)
+
+    shaded = rgb.astype(np.float32) * (1.0 + light[:, :, None])
+    spec = np.clip(light - 0.15, 0.0, 0.2) * 120.0
+    return np.clip(shaded + spec[:, :, None], 0, 255).astype(np.uint8)
+
+
 # ───────────────────────── أدوات مساعدة ─────────────────────────
 def hex_to_rgb(hex_color: str, default=(255, 255, 255)) -> tuple:
     try:
@@ -219,9 +275,8 @@ def defringe(rgb: np.ndarray, alpha: np.ndarray, band: int = DEFRINGE_PX) -> np.
 def apply_3d_puff_shading(rgb: np.ndarray, mask_f: np.ndarray) -> np.ndarray:
     binary = (mask_f > 0.3).astype(np.uint8)
     dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
-    max_d = max(float(dist.max()), 1.0)
-    height = np.clip(dist / min(max_d, 22.0), 0.0, 1.0)
-    height = np.sqrt(height)
+    r = 3.0 * PX_PER_MM                      # قبة ثابتة بالمليمتر
+    height = 1.0 - np.exp(-dist / r)
     height = cv2.GaussianBlur(height, (9, 9), 0)
 
     gx = cv2.Sobel(height, cv2.CV_32F, 1, 0, ksize=5)
@@ -446,6 +501,10 @@ def run_embroidery_pipeline(
             0, 255,
         ).astype(np.uint8)
         orig_a = np.maximum(ring_a, fill_a)
+
+    # ريليف ثابت في كل الأحجام
+    if has_transparency and style != "cross":
+        out_rgb = add_uniform_relief(out_rgb, orig_a)
 
     # 6. تأثيرات ما بعد الموديل
     if style == "puff":
