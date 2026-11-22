@@ -3,6 +3,9 @@ import os
 import time
 import threading
 
+import base64
+import uuid
+
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -506,6 +509,30 @@ def run_embroidery_pipeline(
     return Image.fromarray(result_rgba, mode="RGBA")
 
 
+def alpha_to_svg_path(alpha: np.ndarray, scale: int = 3,
+                      eps: float = 1.5, thr: int = 200) -> str:
+    """بيحوّل الـ alpha لـ path. بنكبّر الماسك 3x ونعمّله blur خفيف
+    قبل استخراج الكونتور عشان الحواف تطلع ناعمة مش مسننة."""
+    a = cv2.resize(alpha, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    a = cv2.GaussianBlur(a, (0, 0), scale * 0.6)
+    mask = (a > thr).astype(np.uint8) * 255
+    del a
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+    del mask
+
+    parts = []
+    for c in contours:
+        if cv2.contourArea(c) < 4 * scale * scale:   # تجاهل النقط الصغيرة
+            continue
+        c = cv2.approxPolyDP(c, eps, True)
+        if len(c) < 3:
+            continue
+        pts = (c.reshape(-1, 2).astype(np.float32) + 0.5) / scale
+        parts.append("M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in pts) + "Z")
+    return " ".join(parts)
+
+
 # ───────────────────────── الـ API ─────────────────────────
 @app.get("/")
 def home():
@@ -555,6 +582,73 @@ def apply_embroidery(
             media_type="image/webp",
             headers={"X-Process-Time": f"{elapsed:.2f}"},
         )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/embroidery-svg")
+def apply_embroidery_svg(
+    file: UploadFile = File(...),
+    style: str = Form("classic"),
+    patch_bg: str = Form("#ffffff"),
+    patch_border: str = Form("#111827"),
+    design_mm: float = Form(DEFAULT_DESIGN_MM),
+    x_internal_secret: str = Header(None),
+):
+    if x_internal_secret != INTERNAL_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if style not in VALID_STYLES:
+        raise HTTPException(status_code=400, detail=f"style غير مدعوم: {style}")
+
+    try:
+        contents = file.file.read(MAX_UPLOAD_BYTES + 1)
+        if len(contents) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="الصورة كبيرة (الحد 15MB)")
+
+        img = ImageOps.exif_transpose(Image.open(io.BytesIO(contents))).convert("RGBA")
+        del contents
+
+        emb = run_embroidery_pipeline(
+            img, design_mm=design_mm, style=style,
+            patch_bg=patch_bg, patch_border=patch_border,
+            with_shadow=True,          # الظل هيتحط في الموقع بـ CSS
+        )
+        del img
+
+        w, h = emb.size
+
+        # صورة عادية من غير شفافية (mode RGB): مفيش حواف نقصها
+        path_d = ""
+        if emb.mode == "RGBA":
+            path_d = alpha_to_svg_path(np.array(emb)[:, :, 3])
+
+        buf = io.BytesIO()
+        emb.save(buf, format="WEBP", lossless=True, method=2)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        del emb, buf
+
+        if path_d:
+            cid = "c" + uuid.uuid4().hex[:8]
+            svg = (
+                f'<svg xmlns="http://www.w3.org/2000/svg" '
+                f'xmlns:xlink="http://www.w3.org/1999/xlink" '
+                f'width="{w}" height="{h}" viewBox="0 0 {w} {h}">'
+                f'<defs><clipPath id="{cid}"><path d="{path_d}" clip-rule="evenodd"/></clipPath></defs>'
+                f'<image xlink:href="data:image/webp;base64,{b64}" href="data:image/webp;base64,{b64}" '
+                f'width="{w}" height="{h}" clip-path="url(#{cid})"/>'
+                f'</svg>'
+            )
+        else:
+            svg = (
+                f'<svg xmlns="http://www.w3.org/2000/svg" '
+                f'xmlns:xlink="http://www.w3.org/1999/xlink" '
+                f'width="{w}" height="{h}" viewBox="0 0 {w} {h}">'
+                f'<image xlink:href="data:image/webp;base64,{b64}" href="data:image/webp;base64,{b64}" '
+                f'width="{w}" height="{h}"/></svg>'
+            )
+
+        return Response(content=svg, media_type="image/svg+xml")
     except HTTPException:
         raise
     except Exception as e:
