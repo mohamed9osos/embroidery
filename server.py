@@ -1,4 +1,3 @@
-
 import io
 import os
 import time
@@ -10,7 +9,7 @@ import onnxruntime as ort
 from PIL import Image, ImageOps
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, FileResponse
+from fastapi.responses import Response
 
 # ───────────────────────── الإعدادات ─────────────────────────
 # أهم رقم: كام بكسل = 1 مم من التصميم الحقيقي.
@@ -33,6 +32,10 @@ PATCH_GROW_PX = 44          # الباتش بيكبّر التصميم بحوا�
 
 MIN_STROKE_MM = 0.5         # أي خط أرفع من كده بيتسمّك
 THIN_GROW_PX = 1            # قد إيه يتسمّك من كل ناحية
+
+MODEL_STROKE_PX = 50.0      # سمك الخط اللي الموديل متعود عليه (للنصوص واللوجو بخطوط)
+STROKE_SIGMA_FACTOR = 0.18  # عامل ضبابية نقل اللون حسب سمك الخط
+SOLID_STROKE_PX = 200.0     # لو السمك عند الحجم المطلوب أكبر من كده = شكل مليان
 
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 40_000_000
@@ -107,6 +110,17 @@ def masked_blur(img: np.ndarray, a: np.ndarray, sigma: float) -> np.ndarray:
     den = cv2.GaussianBlur(a, (0, 0), sigma)
     return num / np.maximum(den[:, :, None], 1e-3)
 
+
+def estimate_stroke_px(alpha: np.ndarray) -> float:
+    """بيقدّر سمك الخط/الضربة من الـ alpha (distance transform)."""
+    binary = (alpha > 128).astype(np.uint8)
+    if binary.sum() == 0:
+        return 0.0
+    dist = cv2.distanceTransform(binary, cv2.DIST_L2, 3)
+    half = np.percentile(dist[dist > 0], 90)
+    return float(2.0 * half)
+
+
 def thicken_thin_parts(rgba: np.ndarray) -> np.ndarray:
     """بيسمّك الخطوط الرفيعة بس (زي الزخارف) عشان الموديل ما يضيّعهاش."""
     a = rgba[:, :, 3]
@@ -130,6 +144,7 @@ def thicken_thin_parts(rgba: np.ndarray) -> np.ndarray:
     rgb = np.where(need[:, :, None], fill, rgba[:, :, :3])
 
     return np.dstack([np.clip(rgb, 0, 255).astype(np.uint8), new_a])
+
 
 # ───────────────────────── أنماط التطريز (قبل الموديل) ─────────────────────────
 def convert_to_outline(rgba: np.ndarray) -> np.ndarray:
@@ -180,15 +195,40 @@ def wrap_as_patch(rgba: np.ndarray, bg_hex: str, border_hex: str) -> np.ndarray:
 
 
 # ───────────────────────── تأثيرات (بعد الموديل) ─────────────────────────
-def transfer_color_from_input(out_rgb: np.ndarray, src_rgb: np.ndarray,
-                              a: np.ndarray, strength: float) -> np.ndarray:
-    """الألوان العامة (الترددات المنخفضة) من الأصل، والملمس (الترددات العالية) من الموديل."""
+def transfer_color_from_input(out_rgb, src_rgb, a, strength, solid=False):
+    """الألوان العامة (الترددات المنخفضة) من الأصل، والملمس (الترددات العالية) من الموديل.
+    الـ sigma بيتحدد حسب سمك الخط (للنصوص/اللوجو بخطوط)، ولو الشكل solid بيفضل على القيمة الأساسية."""
     if strength <= 0:
         return out_rgb
-    sigma = max(1.0, COLOR_SIGMA_MM * PX_PER_MM)
-    low_in = masked_blur(src_rgb, a, sigma)
-    low_out = masked_blur(out_rgb, a, sigma)
-    res = out_rgb.astype(np.float32) + strength * (low_in - low_out)
+    base = COLOR_SIGMA_MM * PX_PER_MM
+
+    # ── قياس سمك الضربة على نسخة مصغّرة: أسرع ×16 ودقة كفاية ──
+    stroke_px = 0.0
+    if (not solid) and a.min() < 0.99:
+        f = 0.25
+        small = cv2.resize(a, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+        bin_ = (small > 0.5).astype(np.uint8)
+        if bin_.any():
+            dist = cv2.distanceTransform(bin_, cv2.DIST_L2, 3)
+            if dist.any():
+                stroke_px = 2.0 * float(np.percentile(dist[dist > 0], 90)) / f
+
+    sigma = max(base, STROKE_SIGMA_FACTOR * stroke_px)
+    sigma = float(np.clip(sigma, 1.0, 0.45 * max(out_rgb.shape[:2])))
+
+    # ── الـ blur على نسخة مصغّرة لما sigma يكبر (بيوفر وقت كتير) ──
+    def _low(img):
+        if sigma <= 8.0:
+            return masked_blur(img, a, sigma)
+        f = 0.25
+        sa = cv2.resize(a, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+        si = cv2.resize(img.astype(np.float32), None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+        num = cv2.GaussianBlur(si * sa[:, :, None], (0, 0), sigma * f)
+        den = cv2.GaussianBlur(sa, (0, 0), sigma * f)
+        low = num / np.maximum(den[:, :, None], 1e-3)
+        return cv2.resize(low, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_CUBIC)
+
+    res = out_rgb.astype(np.float32) + strength * (_low(src_rgb) - _low(out_rgb))
     return np.clip(res, 0, 255).astype(np.uint8)
 
 
@@ -217,11 +257,11 @@ def defringe(rgb: np.ndarray, alpha: np.ndarray, band: int = DEFRINGE_PX) -> np.
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def apply_3d_puff_shading(rgb: np.ndarray, mask_f: np.ndarray) -> np.ndarray:
+def apply_3d_puff_shading(rgb, mask_f, stroke_px=40.0):
     binary = (mask_f > 0.3).astype(np.uint8)
     dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
-    max_d = max(float(dist.max()), 1.0)
-    height = np.clip(dist / min(max_d, 22.0), 0.0, 1.0)
+    cap = max(22.0, 0.5 * stroke_px)  # القبة تغطي الضربة كلها مش بس أول 22px
+    height = np.clip(dist / min(float(dist.max()), cap), 0.0, 1.0)
     height = np.sqrt(height)
     height = cv2.GaussianBlur(height, (9, 9), 0)
 
@@ -347,6 +387,7 @@ def run_embroidery_pipeline(
     patch_bg: str = "#ffffff",
     patch_border: str = "#111827",
     with_shadow: bool = True,
+    is_text: bool = False,
 ) -> Image.Image:
     rgba = np.array(pil_rgba.convert("RGBA"))
     has_transparency = int(rgba[:, :, 3].min()) < 250
@@ -367,7 +408,39 @@ def run_embroidery_pipeline(
     elif style == "applique":
         target -= APPLIQUE_GROW_PX
     h0, w0 = rgba.shape[:2]
-    scale = target / max(h0, w0)
+    stroke0 = estimate_stroke_px(rgba[:, :, 3]) if has_transparency else 0.0
+    fit_scale = target / max(h0, w0)
+    stroke_at_target = stroke0 * fit_scale
+
+    if is_text and has_transparency and stroke0 > 8:
+        # ── منطق النصوص فقط: نضبط سمك الخط على 50px والحجم الأقصى MAX_DESIGN_MM ──
+        solid = False
+        scale = MODEL_STROKE_PX / stroke0
+        new_max = max(h0, w0) * scale
+        lo, hi = MIN_DESIGN_MM * PX_PER_MM, MAX_DESIGN_MM * PX_PER_MM
+        scale *= float(np.clip(new_max, lo, hi)) / new_max
+        stroke_px = stroke0 * scale
+    else:
+        # ── منطق الصور واللوجو ──
+        solid = (not has_transparency) or stroke0 <= 8 or stroke_at_target >= SOLID_STROKE_PX
+        if not solid:
+            # لوجو بخطوط: نضبط السمك على اللي الموديل متعود عليه، بحد أقصى الحجم المطلوب
+            scale = MODEL_STROKE_PX / stroke0
+            new_max = max(h0, w0) * scale
+            lo, hi = MIN_DESIGN_MM * PX_PER_MM, target
+            scale *= float(np.clip(new_max, lo, hi)) / new_max
+            stroke_px = stroke0 * scale
+        else:
+            # أشكال مليانة أو صور عادية: على الحجم المطلوب مباشرة
+            scale = fit_scale
+            stroke_px = 40.0
+
+    print(
+        f"is_text={is_text} stroke0={stroke0:.1f} at_target={stroke_at_target:.1f} "
+        f"solid={solid} scale={scale:.3f} out={int(w0 * scale)}x{int(h0 * scale)}",
+        flush=True,
+    )
+
     if abs(scale - 1.0) > 0.02:
         rgba = resize_rgba(rgba, max(16, int(round(w0 * scale))), max(16, int(round(h0 * scale))))
 
@@ -430,7 +503,7 @@ def run_embroidery_pipeline(
     if style not in ("metallic", "cross"):
         weight_a = orig_a if has_transparency else np.ones_like(orig_a)
         src = rgb_model_in if has_transparency else rgb_on_bg
-        out_rgb = transfer_color_from_input(out_rgb, src, weight_a, COLOR_FIDELITY)
+        out_rgb = transfer_color_from_input(out_rgb, src, weight_a, COLOR_FIDELITY, solid=solid)
 
     # رجّع السطوع الأصلي للألوان الفاتحة (بيكبّر التباين والملمس كمان)
     if k_map is not None:
@@ -450,7 +523,7 @@ def run_embroidery_pipeline(
 
     # 6. تأثيرات ما بعد الموديل
     if style == "puff":
-        out_rgb = apply_3d_puff_shading(out_rgb, orig_a)
+        out_rgb = apply_3d_puff_shading(out_rgb, orig_a, stroke_px)
     elif style == "metallic":
         out_rgb = apply_metallic_effect(out_rgb)
 
@@ -513,6 +586,8 @@ def home():
     return {"status": "Embroidery ONNX Engine Ready 🚀"}
 
 
+# ملاحظة: def عادية (مش async) عشان الشغل التقيل يشتغل في threadpool
+# ومايقفلش الـ event loop.
 @app.post("/embroidery")
 def apply_embroidery(
     file: UploadFile = File(...),
@@ -521,6 +596,7 @@ def apply_embroidery(
     patch_border: str = Form("#111827"),
     design_mm: float = Form(DEFAULT_DESIGN_MM),
     with_shadow: bool = Form(True),
+    is_text: bool = Form(False),
     x_internal_secret: str = Header(None),
 ):
     if x_internal_secret != INTERNAL_SECRET:
@@ -535,7 +611,7 @@ def apply_embroidery(
             raise HTTPException(status_code=413, detail="الصورة كبيرة (الحد 15MB)")
 
         img = Image.open(io.BytesIO(contents))
-        img = ImageOps.exif_transpose(img)
+        img = ImageOps.exif_transpose(img)  # صور الموبايل
         img = img.convert("RGBA")
 
         emb_img = run_embroidery_pipeline(
@@ -545,6 +621,7 @@ def apply_embroidery(
             patch_bg=patch_bg,
             patch_border=patch_border,
             with_shadow=with_shadow,
+            is_text=is_text,
         )
 
         buf = io.BytesIO()
@@ -564,5 +641,6 @@ def apply_embroidery(
 
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
