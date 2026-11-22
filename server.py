@@ -19,14 +19,11 @@ PX_PER_MM = 12.0
 MIN_DESIGN_MM, MAX_DESIGN_MM = 20.0, 85.0
 DEFAULT_DESIGN_MM = 80.0
 
-MODEL_TARGET_PX = 448   # كان 560
-OUTPUT_MAX_PX = 1000    # كان 1600أكبر ضلع للنتيجة النهائية
-
 OUTLINE_MM = 1.6            # سمك خط الـ outline
 COLOR_SIGMA_MM = 0.5        # حجم الضبابية لفصل اللون عن الملمس
 LIGHT_TARGET = 175.0        # الألوان الأفتح من كده بتتغمّق قبل الموديل وترجع بعده
 LIGHT_K_MIN = 0.6           # أقصى تغميق (k)
-DEFRINGE_PX = 2             # عرض شريط الحافة اللي بيتنضف من لون الخلفية الرمادي
+DEFRINGE_PX = 3             # عرض شريط الحافة اللي بيتنضف من لون الخلفية الرمادي
 COLOR_FIDELITY = 0.8        # ثابت: ألوان الأصل + ملمس الموديل
 CROSS_CELL_MM = 1.5         # حجم خلية غرزة الإكس (Cross-stitch)
 APPLIQUE_BORDER_MM = 2.0    # عرض إطار الساتان حوالين قماش الـ Appliqué
@@ -78,17 +75,6 @@ def hex_to_rgb(hex_color: str, default=(255, 255, 255)) -> tuple:
 def odd(n: int, lo: int = 3) -> int:
     n = max(lo, int(round(n)))
     return n if n % 2 == 1 else n + 1
-
-
-def upscale_result(img: Image.Image, factor: float) -> Image.Image:
-    if factor <= 1.02:
-        return img
-    w, h = img.size
-    big = img.resize((int(w * factor), int(h * factor)), Image.LANCZOS)
-    arr = np.array(big)
-    blur = cv2.GaussianBlur(arr, (0, 0), 1.0)
-    arr = cv2.addWeighted(arr, 1.3, blur, -0.3, 0)
-    return Image.fromarray(arr)
 
 
 def resize_rgba(rgba: np.ndarray, new_w: int, new_h: int) -> np.ndarray:
@@ -344,11 +330,9 @@ def run_embroidery_pipeline(
         if len(xs) > 0 and len(ys) > 0:
             rgba = rgba[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
 
+    # 2. مقاس ثابت بالمليمتر => حجم غرزة ثابت
     design_mm = float(np.clip(design_mm, MIN_DESIGN_MM, MAX_DESIGN_MM))
-    # الموديل دايماً بيشوف نفس الحجم، بغض النظر عن حجم التصميم على المنتج
-    target = float(MODEL_TARGET_PX)
-    final_scale = min(OUTPUT_MAX_PX, design_mm * PX_PER_MM) / target
-    
+    target = design_mm * PX_PER_MM
     if style == "applique" and not has_transparency:
         style = "classic"  # الـ appliqué محتاج شكل شفاف
     if style == "patch" and has_transparency:
@@ -445,7 +429,7 @@ def run_embroidery_pipeline(
 
     if not has_transparency:
         res = out_rgb[pad:h - pad, pad:w - pad]
-        return upscale_result(Image.fromarray(res, mode="RGB"), final_scale)
+        return Image.fromarray(res, mode="RGB")
 
     if style != "cross":
         out_rgb = defringe(out_rgb, orig_a)
@@ -453,8 +437,8 @@ def run_embroidery_pipeline(
     # 7. حافة التطريز الطبيعية
     hh, ww = orig_a.shape
     grid_y, grid_x = np.mgrid[0:hh, 0:ww].astype(np.float32)
-    wave_x = np.sin(grid_y * 0.75) * 0.35
-    wave_y = np.sin(grid_x * 0.75) * 0.35
+    wave_x = np.sin(grid_y * 0.75) * 0.85
+    wave_y = np.sin(grid_x * 0.75) * 0.85
     if style == "cross":
         wavy_a = orig_a  # حواف الغرز الحادة من غير تموج
     else:
@@ -462,7 +446,7 @@ def run_embroidery_pipeline(
 
     fg_a = np.clip((wavy_a - 0.18) / 0.72, 0.0, 1.0)
     if style != "cross":
-        pass  # ملغي erode عشان الحروف متتآكلش
+        fg_a = cv2.erode(fg_a, np.ones((3, 3), np.uint8))  # شيل بكسل الحافة المتأثر بالخلفية
     fg_a_3d = fg_a[:, :, None]
 
     if with_shadow:
@@ -493,7 +477,7 @@ def run_embroidery_pipeline(
     if pad_r:
         result_rgba = result_rgba[:, :-pad_r]
 
-    return upscale_result(Image.fromarray(result_rgba, mode="RGBA"), final_scale)
+    return Image.fromarray(result_rgba, mode="RGBA")
 
 
 # ───────────────────────── الـ API ─────────────────────────
