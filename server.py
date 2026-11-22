@@ -30,6 +30,9 @@ APPLIQUE_BORDER_MM = 2.0    # عرض إطار الساتان حوالين قما
 APPLIQUE_GROW_PX = int(APPLIQUE_BORDER_MM * PX_PER_MM)  # الإطار بيطلع برا الشكل بنص عرضه
 PATCH_GROW_PX = 44          # الباتش بيكبّر التصميم بحوالي 22px من كل ناحية
 
+MIN_STROKE_MM = 0.5         # أي خط أرفع من كده بيتسمّك
+THIN_GROW_PX = 1            # قد إيه يتسمّك من كل ناحية
+
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 40_000_000
 VALID_STYLES = {"classic", "puff", "patch", "outline", "metallic", "cross", "applique"}
@@ -103,6 +106,29 @@ def masked_blur(img: np.ndarray, a: np.ndarray, sigma: float) -> np.ndarray:
     den = cv2.GaussianBlur(a, (0, 0), sigma)
     return num / np.maximum(den[:, :, None], 1e-3)
 
+def thicken_thin_parts(rgba: np.ndarray) -> np.ndarray:
+    """بيسمّك الخطوط الرفيعة بس (زي الزخارف) عشان الموديل ما يضيّعهاش."""
+    a = rgba[:, :, 3]
+    binary = (a > 20).astype(np.uint8) * 255
+
+    k = odd(MIN_STROKE_MM * PX_PER_MM)
+    opened = cv2.morphologyEx(
+        binary, cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)),
+    )
+    thin = cv2.subtract(binary, opened)
+
+    g = 2 * THIN_GROW_PX + 1
+    thin_d = cv2.dilate(thin, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (g, g)))
+    thin_d = cv2.GaussianBlur(thin_d, (3, 3), 0)
+
+    new_a = np.maximum(a, thin_d)
+
+    fill = masked_blur(rgba[:, :, :3], a.astype(np.float32) / 255.0, 2.0)
+    need = new_a > a
+    rgb = np.where(need[:, :, None], fill, rgba[:, :, :3])
+
+    return np.dstack([np.clip(rgb, 0, 255).astype(np.uint8), new_a])
 
 # ───────────────────────── أنماط التطريز (قبل الموديل) ─────────────────────────
 def convert_to_outline(rgba: np.ndarray) -> np.ndarray:
@@ -346,7 +372,7 @@ def run_embroidery_pipeline(
 
     # شيل حافة 1 بكسل ملوثة
     if has_transparency:
-        rgba[:, :, 3] = cv2.erode(rgba[:, :, 3], np.ones((3, 3), np.uint8))
+        rgba = thicken_thin_parts(rgba)
 
     # 3. تعديلات ما قبل الموديل
     if style == "outline" and has_transparency:
@@ -396,7 +422,7 @@ def run_embroidery_pipeline(
         out_rgb = (np.clip(out.transpose(1, 2, 0), 0.0, 1.0) * 255.0).astype(np.uint8)
 
         blur = cv2.GaussianBlur(out_rgb, (0, 0), 0.8)
-        out_rgb = cv2.addWeighted(out_rgb, 1.08, blur, -0.08, 0)
+        out_rgb = cv2.addWeighted(out_rgb, 1.05, blur, -0.05, 0)
 
     # 5. الألوان من الأصل + الملمس من الموديل
     orig_a = rgba_padded[:, :, 3].astype(np.float32) / 255.0
@@ -437,14 +463,14 @@ def run_embroidery_pipeline(
     # 7. حافة التطريز الطبيعية
     hh, ww = orig_a.shape
     grid_y, grid_x = np.mgrid[0:hh, 0:ww].astype(np.float32)
-    wave_x = np.sin(grid_y * 0.75) * 0.85
-    wave_y = np.sin(grid_x * 0.75) * 0.85
+    wave_x = np.sin(grid_y * 0.75) * 0.5
+    wave_y = np.sin(grid_x * 0.75) * 0.5
     if style == "cross":
         wavy_a = orig_a  # حواف الغرز الحادة من غير تموج
     else:
         wavy_a = cv2.remap(orig_a, grid_x + wave_x, grid_y + wave_y, cv2.INTER_LINEAR, borderValue=0.0)
 
-    fg_a = np.clip((wavy_a - 0.18) / 0.72, 0.0, 1.0)
+    fg_a = np.clip((wavy_a - 0.10) / 0.60, 0.0, 1.0)
     if style != "cross":
         fg_a = cv2.erode(fg_a, np.ones((3, 3), np.uint8))  # شيل بكسل الحافة المتأثر بالخلفية
     fg_a_3d = fg_a[:, :, None]
