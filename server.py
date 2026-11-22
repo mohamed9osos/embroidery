@@ -637,7 +637,7 @@ def apply_embroidery_svg(
         # صورة عادية من غير شفافية (mode RGB): مفيش حواف نقصها
         path_d = ""
         if emb.mode == "RGBA":
-            path_d = alpha_to_svg_path(np.array(emb)[:, :, 3]), scale=2)
+            path_d = alpha_to_svg_path(np.array(emb)[:, :, 3], scale=2)
 
         buf = io.BytesIO()
         emb.save(buf, format="WEBP", lossless=True, method=2)
