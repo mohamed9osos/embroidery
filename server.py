@@ -3,6 +3,8 @@ import os
 import time
 import threading
 
+import traceback
+
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -77,47 +79,49 @@ RELIEF_STRENGTH = 0.9       # قوة الإضاءة الكلية
 
 def add_uniform_relief(rgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     """ريليف ثابت بالمليمتر: حافة بارزة + غرز في الداخل، بغض النظر عن حجم التصميم."""
+    f32 = np.float32
     mask = (alpha > 0.4).astype(np.uint8)
-    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5).astype(f32)
     H, W = mask.shape
 
     # 1) bevel ثابت عند الحافة
-    r = RELIEF_EDGE_MM * PX_PER_MM
-    bevel = 1.0 - np.exp(-dist / r)
+    r = f32(RELIEF_EDGE_MM * PX_PER_MM)
+    bevel = (f32(1.0) - np.exp(-dist / r)).astype(f32)
     bevel = cv2.GaussianBlur(bevel, (0, 0), 1.5)
 
     # 2) غرز ساتان اصطناعية
-    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    yy, xx = np.mgrid[0:H, 0:W].astype(f32)
     th = np.deg2rad(STITCH_ANGLE_DEG)
-    u = xx * np.cos(th) + yy * np.sin(th)     # عمودي على الغرز
-    v = -xx * np.sin(th) + yy * np.cos(th)    # على طول الغرز
-    pitch = STITCH_PITCH_MM * PX_PER_MM
-    slen = STITCH_LEN_MM * PX_PER_MM
+    c, s_ = f32(np.cos(th)), f32(np.sin(th))
+    u = (xx * c + yy * s_).astype(f32)      # عمودي على الغرز
+    v = (-xx * s_ + yy * c).astype(f32)     # على طول الغرز
+    pitch = f32(STITCH_PITCH_MM * PX_PER_MM)
+    slen = f32(STITCH_LEN_MM * PX_PER_MM)
 
     row = np.floor(u / pitch).astype(np.int32)
     row -= row.min()
     rng = np.random.default_rng(11)
-    phase = rng.uniform(0, slen, row.max() + 1).astype(np.float32)[row]
+    phase = rng.uniform(0, float(slen), int(row.max()) + 1).astype(f32)[row]
 
-    ridge = 0.5 + 0.5 * np.cos(2 * np.pi * u / pitch)           # حرف الغرزة
-    pos = np.mod(v + phase, slen)                                 # مكان التكسير
-    gap = np.exp(-((pos / (0.25 * PX_PER_MM)) ** 2))              # نقطة دخول الإبرة
-    stitch = ridge * (1.0 - 0.6 * gap)
+    ridge = (0.5 + 0.5 * np.cos(f32(2 * np.pi) * u / pitch)).astype(f32)
+    pos = np.mod(v + phase, slen).astype(f32)
+    gap = np.exp(-((pos / f32(0.25 * PX_PER_MM)) ** 2)).astype(f32)
+    stitch = (ridge * (1.0 - 0.6 * gap)).astype(f32)
 
     # الغرز تظهر بس في الداخل
     s, e = INTERIOR_START_MM * PX_PER_MM, INTERIOR_FULL_MM * PX_PER_MM
-    w_in = np.clip((dist - s) / max(e - s, 1.0), 0.0, 1.0)
-    w_in = w_in * w_in * (3 - 2 * w_in)
+    w_in = np.clip((dist - s) / max(e - s, 1.0), 0.0, 1.0).astype(f32)
+    w_in = (w_in * w_in * (3 - 2 * w_in)).astype(f32)
 
-    height = 1.2 * bevel + 0.35 * stitch * w_in
+    height = np.ascontiguousarray((1.2 * bevel + 0.35 * stitch * w_in).astype(f32))
 
     # 3) إضاءة موحدة
     gx = cv2.Sobel(height, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(height, cv2.CV_32F, 0, 1, ksize=3)
-    light = np.clip(-(gx * 0.65 + gy * 0.75) * RELIEF_STRENGTH * 0.5, -0.28, 0.30)
+    light = np.clip(-(gx * 0.65 + gy * 0.75) * RELIEF_STRENGTH * 0.5, -0.28, 0.30).astype(f32)
     light *= (alpha > 0.4)
 
-    shaded = rgb.astype(np.float32) * (1.0 + light[:, :, None])
+    shaded = rgb.astype(f32) * (1.0 + light[:, :, None])
     spec = np.clip(light - 0.15, 0.0, 0.2) * 120.0
     return np.clip(shaded + spec[:, :, None], 0, 255).astype(np.uint8)
 
@@ -617,7 +621,8 @@ def apply_embroidery(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
