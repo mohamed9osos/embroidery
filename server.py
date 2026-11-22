@@ -22,6 +22,8 @@ PX_PER_MM = 12.0
 MIN_DESIGN_MM, MAX_DESIGN_MM = 20.0, 85.0
 DEFAULT_DESIGN_MM = 80.0
 
+REF_DESIGN_MM = 40.0 
+
 OUTLINE_MM = 1.6            # سمك خط الـ outline
 COLOR_SIGMA_MM = 0.5        # حجم الضبابية لفصل اللون عن الملمس
 LIGHT_TARGET = 175.0        # الألوان الأفتح من كده بتتغمّق قبل الموديل وترجع بعده
@@ -341,7 +343,18 @@ def build_applique_layers(rgba: np.ndarray, border_hex: str):
     return fill_rgba, ring_rgba
 
 
+
 # ───────────────────────── الـ Pipeline الرئيسي ─────────────────────────
+def _upscale_result(img: Image.Image, requested_mm: float) -> Image.Image:
+    """التطريز بيتحسب دايماً على الحجم المرجعي، وبعدين نكبّر/نصغّر للحجم المطلوب."""
+    scale_up = requested_mm / REF_DESIGN_MM
+    if abs(scale_up - 1.0) > 0.02:
+        nw = max(1, int(round(img.width * scale_up)))
+        nh = max(1, int(round(img.height * scale_up)))
+        img = img.resize((nw, nh), Image.LANCZOS)
+    return img
+
+
 def run_embroidery_pipeline(
     pil_rgba: Image.Image,
     design_mm: float = DEFAULT_DESIGN_MM,
@@ -359,8 +372,9 @@ def run_embroidery_pipeline(
         if len(xs) > 0 and len(ys) > 0:
             rgba = rgba[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
 
-    # 2. مقاس ثابت بالمليمتر => حجم غرزة ثابت
-    design_mm = float(np.clip(design_mm, MIN_DESIGN_MM, MAX_DESIGN_MM))
+    # 2. التطريز دايماً على حجم مرجعي ثابت، والتكبير بعد كده
+    requested_mm = float(np.clip(design_mm, MIN_DESIGN_MM, MAX_DESIGN_MM))
+    design_mm = REF_DESIGN_MM
     target = design_mm * PX_PER_MM
     if style == "applique" and not has_transparency:
         style = "classic"  # الـ appliqué محتاج شكل شفاف
@@ -458,7 +472,8 @@ def run_embroidery_pipeline(
 
     if not has_transparency:
         res = out_rgb[pad:h - pad, pad:w - pad]
-        return Image.fromarray(res, mode="RGB")
+        result = Image.fromarray(res, mode="RGB")
+        return _upscale_result(result, requested_mm)
 
     if style != "cross":
         out_rgb = defringe(out_rgb, orig_a)
@@ -506,7 +521,8 @@ def run_embroidery_pipeline(
     if pad_r:
         result_rgba = result_rgba[:, :-pad_r]
 
-    return Image.fromarray(result_rgba, mode="RGBA")
+    result = Image.fromarray(result_rgba, mode="RGBA")
+    return _upscale_result(result, requested_mm)
 
 
 def alpha_to_svg_path(alpha: np.ndarray, scale: int = 3,
@@ -621,7 +637,7 @@ def apply_embroidery_svg(
         # صورة عادية من غير شفافية (mode RGB): مفيش حواف نقصها
         path_d = ""
         if emb.mode == "RGBA":
-            path_d = alpha_to_svg_path(np.array(emb)[:, :, 3])
+            path_d = alpha_to_svg_path(np.array(emb)[:, :, 3]), scale=2)
 
         buf = io.BytesIO()
         emb.save(buf, format="WEBP", lossless=True, method=2)
